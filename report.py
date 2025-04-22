@@ -57,7 +57,7 @@ class ReportApp:
         tk.Button(root, text="Forwarded", command=lambda: self.set_result("Temp Banned and Forwarded")).place(x=210, y=180)
 
         # Generate Report button
-        tk.Button(root, text="Generate Report", command=self.generate_report).place(x=190, y=450)  # Adjusted position
+        tk.Button(root, text="Generate Report", command=self.generate_report).place(x=155, y=450)  # Adjusted position
 
         # Output boxes
         self.report_output = tk.Text(root, height=10, width=50)
@@ -82,7 +82,8 @@ class ReportApp:
         rank_display_mapping = {
             "Trial Moderator": "Trial Moderator",
             "Moderator": "Moderator",
-            "Admin": "Administrator"
+            "Admin": "Administrator",
+            "Senior Administrator": "Senior Administrator"  # Add Senior Administrator here
         }
         return rank_display_mapping.get(self.selected_rank, "Rank: ")
 
@@ -245,7 +246,7 @@ class Settings:
         # Rank
         tk.Label(self.window, text="Select Rank:").pack()
         self.rank_var = tk.StringVar(value=self.report_app.selected_rank)
-        rank_options = ["Trial Moderator", "Moderator", "Admin"]
+        rank_options = ["Trial Moderator", "Moderator", "Admin", "Senior Administrator"]
         self.rank_menu = ttk.Combobox(self.window, textvariable=self.rank_var, values=rank_options)
         self.rank_menu.pack()
         tk.Button(self.window, text="Update Rank", command=self.update_rank).pack()
