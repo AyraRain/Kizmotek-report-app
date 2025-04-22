@@ -66,6 +66,9 @@ class ReportApp:
         # Settings Menu Button
         tk.Button(root, text="Settings", command=self.open_settings).grid(row=12, column=1)
 
+        # Print current rank button (next to settings button)
+        tk.Button(root, text="Print Current Rank", command=self.print_current_rank).grid(row=12, column=2)
+
         # Save settings when the window is closed
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -75,10 +78,10 @@ class ReportApp:
             "Moderator": "Moderator",
             "Admin": "Administrator"
         }
-        return rank_display_mapping.get(self.selected_rank, "Rank:")
+        return rank_display_mapping.get(self.selected_rank, "Rank: ")
 
     def update_rank_label(self):
-        self.rank_label.config(text=self.get_rank_display())
+        self.rank_label.config(text=f"Rank: {self.get_rank_display()}")
 
     def set_punishment(self, punishment, label):
         self.punishment = punishment  # Set the punishment based on the button clicked
@@ -110,8 +113,10 @@ class ReportApp:
             if self.check_if_reported(reported_username):
                 messagebox.showwarning("Previous Report Warning", f"The user '{reported_username}' has been reported before.")
 
-            # Create formatted report log
-            report_log = f"""{self.get_rank_display()}: {self.moderator_id}
+            # Create formatted report log with dynamic rank based on selected rank
+            rank_display = self.get_rank_display()  # Always fetch the updated rank
+            report_log = f"""
+{rank_display}: {self.moderator_id}
 Reporter: {reporter.group(1)}
 Reported: {reported_username}
 Reason: {reason.group(1).strip()}
@@ -120,7 +125,8 @@ JobID: {job_id.group(1)}
 """
 
             # Create formatted ban log using the specified format
-            ban_log = f"""{self.get_rank_display()}: {self.moderator_id}
+            ban_log = f"""
+{rank_display}: {self.moderator_id}
 User: {reported_username}
 Reason: {self.punishment_label}
 Punishment: {self.punishment}
@@ -151,7 +157,7 @@ Proof:
 
         with open(self.reported_users_file, "r") as file:
             reported_users = file.read().splitlines()
-            return username in reported_users  # Check if username is in the reported users list
+            return username in reported_users  # Check if username is in reported users list
 
     def add_reported_user(self, username):
         with open(self.reported_users_file, "a") as file:
@@ -201,6 +207,10 @@ Proof:
             except requests.exceptions.RequestException as e:
                 messagebox.showerror("Webhook Error", f"Could not send report to webhook: {e}")
 
+    def print_current_rank(self):
+        # Display the current rank in a message box
+        messagebox.showinfo("Current Rank", f"The current rank is: {self.get_rank_display()}")
+
 class Settings:
     def __init__(self, report_app):
         self.report_app = report_app
@@ -232,84 +242,47 @@ class Settings:
         # Punishment Settings
         tk.Label(self.window, text="Manage Punishments:").pack()
         self.punishment_name_var = tk.StringVar()
-        self.punishment_entry = tk.Entry(self.window, textvariable=self.punishment_name_var, width=50)
-        self.punishment_entry.pack()
-
         self.punishment_action_var = tk.StringVar()
-        self.punishment_action_entry = tk.Entry(self.window, textvariable=self.punishment_action_var, width=50)
+
+        tk.Label(self.window, text="Punishment Name:").pack()
+        self.punishment_name_entry = tk.Entry(self.window, textvariable=self.punishment_name_var)
+        self.punishment_name_entry.pack()
+
+        tk.Label(self.window, text="Punishment Action:").pack()
+        self.punishment_action_entry = tk.Entry(self.window, textvariable=self.punishment_action_var)
         self.punishment_action_entry.pack()
 
-        tk.Button(self.window, text="Add Punishment", command=self.add_punishment).pack()
-        tk.Button(self.window, text="Remove Punishment", command=self.remove_punishment).pack()
-        tk.Button(self.window, text="Change Punishment", command=self.change_punishment).pack()
-
-        self.load_punishments()
-
-    def load_punishments(self):
-        for punishment, (reason, punishment_action) in self.report_app.punishment_buttons.items():
-            tk.Label(self.window, text=f"{reason}: {punishment_action}").pack()
+        tk.Button(self.window, text="Save Punishment", command=self.save_punishment).pack()
 
     def update_rank(self):
         new_rank = self.rank_var.get()
         self.report_app.selected_rank = new_rank
-        self.report_app.save_settings()
-        self.report_app.update_rank_label()
-        messagebox.showinfo("Success", f"Rank updated to: {new_rank}")
+        self.report_app.update_rank_label()  # Update the rank label in the main app
+        self.report_app.save_settings()  # Save the new rank
+        messagebox.showinfo("Rank Updated", f"Rank updated to {new_rank}")
 
     def update_webhook(self):
         new_webhook = self.webhook_var.get()
         self.report_app.webhook_url = new_webhook
-        self.report_app.save_settings()
-        messagebox.showinfo("Success", "Webhook URL updated.")
+        self.report_app.save_settings()  # Save the new webhook
+        messagebox.showinfo("Webhook Updated", "Webhook URL updated successfully")
 
     def update_moderator(self):
-        new_moderator = self.moderator_var.get().strip()
-        # Ensure the new moderator ID is in the correct format
-        if re.match(r"^\d+$", new_moderator):
-            self.report_app.moderator_id = f"<@{new_moderator}>"
-            self.report_app.save_settings()
-            messagebox.showinfo("Success", f"Moderator ID updated to: <@{new_moderator}>")
-        else:
-            messagebox.showerror("Input Error", "Please enter a valid numeric moderator ID.")
+        new_moderator_id = "<@" + self.moderator_var.get() + ">"  # Format moderator ID correctly
+        self.report_app.moderator_id = new_moderator_id
+        self.report_app.save_settings()  # Save the new moderator ID
+        messagebox.showinfo("Moderator ID Updated", f"Moderator ID updated to {new_moderator_id}")
 
-    def add_punishment(self):
-        punishment_name = self.punishment_name_var.get().strip()
-        punishment_action = self.punishment_action_var.get().strip()
+    def save_punishment(self):
+        punishment_name = self.punishment_name_var.get()
+        punishment_action = self.punishment_action_var.get()
 
         if punishment_name and punishment_action:
-            # Add the new punishment
-            self.report_app.punishment_buttons[punishment_name] = (punishment_name, punishment_action)
-            self.report_app.save_settings()
-            self.load_punishments()  # Refresh the list
-            messagebox.showinfo("Success", f"Punishment '{punishment_name}' added.")
+            self.report_app.punishment_buttons[punishment_name] = (punishment_action, punishment_name)
+            self.report_app.save_settings()  # Save the updated punishments
+            messagebox.showinfo("Punishment Saved", "Punishment updated successfully")
         else:
-            messagebox.showerror("Input Error", "Please enter both punishment name and action.")
-
-    def remove_punishment(self):
-        punishment_name = self.punishment_name_var.get().strip()
-        if punishment_name in self.report_app.punishment_buttons:
-            del self.report_app.punishment_buttons[punishment_name]
-            self.report_app.save_settings()
-            self.load_punishments()  # Refresh the list
-            messagebox.showinfo("Success", f"Punishment '{punishment_name}' removed.")
-        else:
-            messagebox.showerror("Input Error", f"Punishment '{punishment_name}' not found.")
-
-    def change_punishment(self):
-        punishment_name = self.punishment_name_var.get().strip()
-        punishment_action = self.punishment_action_var.get().strip()
-
-        if punishment_name in self.report_app.punishment_buttons:
-            if punishment_action:
-                # Change the punishment action
-                self.report_app.punishment_buttons[punishment_name] = (punishment_name, punishment_action)
-                self.report_app.save_settings()
-                self.load_punishments()  # Refresh the list
-                messagebox.showinfo("Success", f"Punishment '{punishment_name}' updated.")
-            else:
-                messagebox.showerror("Input Error", "Please enter a new punishment action.")
-        else:
-            messagebox.showerror("Input Error", f"Punishment '{punishment_name}' not found.")
+            messagebox.showerror("Input Error", "Please fill out both fields for punishment.")
 
 if __name__ == "__main__":
     root = tk.Tk()
