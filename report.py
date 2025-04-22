@@ -6,10 +6,14 @@ import json
 import os
 from datetime import datetime
 
+
 class ReportApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Report System")
+
+        # Set minimum window size to ensure all elements are visible
+        self.root.minsize(600, 900)  # Adjust height to fit all buttons and output boxes
 
         # Initialize variables
         self.moderator_id = "<@299146723979427840>"
@@ -32,42 +36,44 @@ class ReportApp:
 
         # Display current rank
         self.rank_label = tk.Label(root, text=f"Rank: {self.get_rank_display()}")
-        self.rank_label.grid(row=0, column=0, columnspan=3)
+        self.rank_label.place(x=10, y=10)  # Use absolute positioning for the rank label
 
         # Input box
-        tk.Label(root, text="Paste Report Info Here:").grid(row=1, column=0, columnspan=3)
+        tk.Label(root, text="Paste Report Info Here:").place(x=10, y=250)
         self.input_entry = tk.Text(root, height=10, width=50)
-        self.input_entry.grid(row=2, column=0, columnspan=3)
+        self.input_entry.place(x=10, y=280)
 
         # Punishment Buttons
-        tk.Label(root, text="Select Punishment:").grid(row=3, column=0, columnspan=3)
+        tk.Label(root, text="Select Punishment:").place(x=10, y=50)  # Use absolute positioning for the label
         for i, (label, (action, _)) in enumerate(self.punishment_buttons.items()):
-            tk.Button(root, text=label, command=lambda a=action, l=label: self.set_punishment(a, l)).grid(row=4, column=i)
+            button = tk.Button(self.root, text=label, command=lambda a=action, l=label: self.set_punishment(a, l))
+            button.place(x=10 + i * 100, y=80)  # Default position
+            self.punishment_buttons[label] = (action, button)
 
         # Report Result Buttons
-        tk.Label(root, text="Select Report Result:").grid(row=6, column=0, columnspan=3)
-        tk.Button(root, text="NEF", command=lambda: self.set_result("Not Enough Evidence")).grid(row=7, column=0)
-        tk.Button(root, text="Banned", command=lambda: self.set_result("Banned")).grid(row=7, column=1)
-        tk.Button(root, text="Forwarded", command=lambda: self.set_result("Temp Banned and Forwarded")).grid(row=7, column=2)
+        tk.Label(root, text="Select Report Result:").place(x=10, y=150)  # Use absolute positioning for the label
+        tk.Button(root, text="NEF", command=lambda: self.set_result("Not Enough Evidence")).place(x=10, y=180)
+        tk.Button(root, text="Banned", command=lambda: self.set_result("Banned")).place(x=110, y=180)
+        tk.Button(root, text="Forwarded", command=lambda: self.set_result("Temp Banned and Forwarded")).place(x=210, y=180)
 
         # Generate Report button
-        tk.Button(root, text="Generate Report", command=self.generate_report).grid(row=8, column=1)
+        tk.Button(root, text="Generate Report", command=self.generate_report).place(x=190, y=450)  # Adjusted position
 
         # Output boxes
         self.report_output = tk.Text(root, height=10, width=50)
-        self.report_output.grid(row=9, column=0, columnspan=3)
+        self.report_output.place(x=10, y=500)
 
         self.ban_output = tk.Text(root, height=10, width=50)
-        self.ban_output.grid(row=10, column=0, columnspan=3)
+        self.ban_output.place(x=10, y=650)
 
         # Ban Log Button
-        tk.Button(root, text="Open Ban Log", command=self.open_ban_log).grid(row=11, column=1)
+        tk.Button(root, text="Open Ban Log", command=self.open_ban_log).place(x=10, y=820)
 
         # Settings Menu Button
-        tk.Button(root, text="Settings", command=self.open_settings).grid(row=12, column=0)
+        tk.Button(root, text="Settings", command=self.open_settings).place(x=110, y=820)
 
         # Print current rank button (next to settings button)
-        tk.Button(root, text="Print Current Rank", command=self.print_current_rank).grid(row=12, column=2)
+        tk.Button(root, text="Print Current Rank", command=self.print_current_rank).place(x=210, y=820)
 
         # Save settings when the window is closed
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -185,7 +191,19 @@ Proof:
                 self.moderator_id = settings.get("moderator_id", self.moderator_id)
                 self.selected_rank = settings.get("rank", self.selected_rank)
                 self.webhook_url = settings.get("webhook_url", self.webhook_url)
-                self.punishment_buttons = settings.get("punishment_buttons", self.punishment_buttons)  # Load punishments
+                for label, data in settings.get("punishment_buttons", {}).items():
+                    if label in self.punishment_buttons:
+                        action = data.get("action", self.punishment_buttons[label][0])
+                        position = data.get("position", None)
+                        button = self.punishment_buttons[label][1]
+
+                        # Ensure the button reference is preserved
+                        if isinstance(button, tk.Button):
+                            self.punishment_buttons[label] = (action, button)
+
+                            # Restore button position if available
+                            if position:
+                                button.place(x=position[0], y=position[1])
 
     def save_settings(self):
         """Save current settings to a JSON file."""
@@ -193,7 +211,13 @@ Proof:
             "moderator_id": self.moderator_id,
             "rank": self.selected_rank,
             "webhook_url": self.webhook_url,
-            "punishment_buttons": self.punishment_buttons  # Save punishments
+            "punishment_buttons": {
+                k: {
+                    "action": v[0],
+                    "position": (v[1].winfo_x(), v[1].winfo_y()) if isinstance(v[1], tk.Button) else None
+                }
+                for k, v in self.punishment_buttons.items()
+            }
         }
         with open("settings.json", "w") as file:
             json.dump(settings, file)
@@ -258,6 +282,93 @@ class Settings:
 
         tk.Button(self.window, text="Save Punishment", command=self.save_punishment).pack()
 
+        # Drag-and-Drop Toggle
+        tk.Label(self.window, text="Drag and Drop Punishment Buttons:").pack()
+        self.drag_enabled = tk.BooleanVar(value=False)
+        tk.Checkbutton(self.window, text="Enable", variable=self.drag_enabled, command=self.toggle_drag).pack()
+
+        # Save and Restore Button Positions
+        tk.Button(self.window, text="Save Button Positions", command=self.save_button_positions).pack()
+        tk.Button(self.window, text="Restore Button Positions", command=self.restore_button_positions).pack()
+
+    def save_button_positions(self):
+        """Manually save the positions of the buttons."""
+        self.report_app.save_settings()
+        messagebox.showinfo("Save Positions", "Button positions have been saved successfully.")
+
+    def restore_button_positions(self):
+        """Restore the positions of the buttons from the settings."""
+        self.report_app.load_settings()
+        messagebox.showinfo("Restore Positions", "Button positions have been restored successfully.")
+
+    def toggle_drag(self):
+        """Enable or disable drag-and-drop functionality."""
+        if self.drag_enabled.get():
+            for label, (_, button) in self.report_app.punishment_buttons.items():
+                if button:
+                    button.bind("<Button-1>", self.start_drag)
+                    button.bind("<B1-Motion>", self.drag)
+                    button.bind("<ButtonRelease-1>", self.stop_drag)
+        else:
+            for label, (_, button) in self.report_app.punishment_buttons.items():
+                if button:
+                    button.unbind("<Button-1>")
+                    button.unbind("<B1-Motion>")
+                    button.unbind("<ButtonRelease-1>")
+
+    def start_drag(self, event):
+        """Start dragging a button."""
+        self.dragging_button = event.widget
+        self.start_x = event.x
+
+    def drag(self, event):
+        """Handle dragging of a button (restricted to x-axis and within section boundaries)."""
+        if self.dragging_button:
+            dx = event.x - self.start_x
+            current_x = self.dragging_button.winfo_x()
+            new_x = current_x + dx
+
+            # Get the window's width and the button's width
+            window_width = self.dragging_button.winfo_toplevel().winfo_width()
+            button_width = self.dragging_button.winfo_width()
+
+            # Constrain the button's movement within the window's width
+            if new_x < 0:
+                new_x = 0  # Prevent moving beyond the left edge
+            elif new_x + button_width > window_width:
+                new_x = window_width - button_width  # Prevent moving beyond the right edge
+
+            # Get the button's current y-coordinate
+            current_y = self.dragging_button.winfo_y()
+
+            # Enforce vertical boundaries for punishment and report sections
+            if 280 <= current_y <= 320:  # Punishment section row
+                new_y = 280
+            elif 400 <= current_y <= 440:  # Report section row
+                new_y = 400
+            else:
+                new_y = current_y  # Keep the button in its current row if it's not in a valid section
+
+            # Enforce horizontal spacing between buttons
+            for label, (_, button) in self.report_app.punishment_buttons.items():
+                if button and button != self.dragging_button:
+                    other_x = button.winfo_x()
+                    other_width = button.winfo_width()
+
+                    # Prevent overlap by ensuring a minimum spacing of 10 pixels
+                    if abs(new_x - other_x) < button_width + 10:
+                        if new_x > other_x:
+                            new_x = other_x + other_width + 10
+                        else:
+                            new_x = other_x - button_width - 10
+
+            # Update the button's position
+            self.dragging_button.place(x=new_x, y=new_y)
+
+    def stop_drag(self, event):
+        """Stop dragging and save the new position."""
+        self.dragging_button = None
+
     def update_rank(self):
         new_rank = self.rank_var.get()
         self.report_app.selected_rank = new_rank
@@ -282,7 +393,7 @@ class Settings:
         punishment_action = self.punishment_action_var.get()
 
         if punishment_name and punishment_action:
-            self.report_app.punishment_buttons[punishment_name] = (punishment_action, punishment_name)
+            self.report_app.punishment_buttons[punishment_name] = (punishment_action, None)
             self.report_app.save_settings()  # Save the updated punishments
             messagebox.showinfo("Punishment Saved", "Punishment updated successfully")
         else:
@@ -291,6 +402,7 @@ class Settings:
     def print_current_rank(self):
         # Display the current rank in a message box
         messagebox.showinfo("Current Rank", f"The current rank is: {self.report_app.get_rank_display()}")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
