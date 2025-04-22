@@ -64,7 +64,7 @@ class ReportApp:
         tk.Button(root, text="Open Ban Log", command=self.open_ban_log).grid(row=11, column=1)
 
         # Settings Menu Button
-        tk.Button(root, text="Settings", command=self.open_settings).grid(row=12, column=1)
+        tk.Button(root, text="Settings", command=self.open_settings).grid(row=12, column=0)
 
         # Print current rank button (next to settings button)
         tk.Button(root, text="Print Current Rank", command=self.print_current_rank).grid(row=12, column=2)
@@ -211,6 +211,7 @@ Proof:
         # Display the current rank in a message box
         messagebox.showinfo("Current Rank", f"The current rank is: {self.get_rank_display()}")
 
+
 class Settings:
     def __init__(self, report_app):
         self.report_app = report_app
@@ -224,6 +225,9 @@ class Settings:
         self.rank_menu = ttk.Combobox(self.window, textvariable=self.rank_var, values=rank_options)
         self.rank_menu.pack()
         tk.Button(self.window, text="Update Rank", command=self.update_rank).pack()
+
+        # Print current rank button in settings
+        tk.Button(self.window, text="Print Current Rank", command=self.print_current_rank).pack()
 
         # Webhook URL
         tk.Label(self.window, text="Webhook URL:").pack()
@@ -283,6 +287,10 @@ class Settings:
             messagebox.showinfo("Punishment Saved", "Punishment updated successfully")
         else:
             messagebox.showerror("Input Error", "Please fill out both fields for punishment.")
+
+    def print_current_rank(self):
+        # Display the current rank in a message box
+        messagebox.showinfo("Current Rank", f"The current rank is: {self.report_app.get_rank_display()}")
 
 if __name__ == "__main__":
     root = tk.Tk()
