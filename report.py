@@ -111,7 +111,7 @@ class ReportApp:
                 messagebox.showwarning("Previous Report Warning", f"The user '{reported_username}' has been reported before.")
 
             # Create formatted report log
-            report_log = f"""Senior Administrator: {self.moderator_id}
+            report_log = f"""{self.get_rank_display()}: {self.moderator_id}
 Reporter: {reporter.group(1)}
 Reported: {reported_username}
 Reason: {reason.group(1).strip()}
@@ -120,7 +120,7 @@ JobID: {job_id.group(1)}
 """
 
             # Create formatted ban log using the specified format
-            ban_log = f"""Senior Administrator: {self.moderator_id}
+            ban_log = f"""{self.get_rank_display()}: {self.moderator_id}
 User: {reported_username}
 Reason: {self.punishment_label}
 Punishment: {self.punishment}
