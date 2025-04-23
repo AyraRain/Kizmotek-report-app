@@ -28,10 +28,10 @@ class ReportApp:
 
         # Default punishment buttons
         self.punishment_buttons = {
-            "Toxicity": ("Warned for Toxicity", None),
-            "Spawn Camping": ("Warned for Spawn Camping", None),
-            "Exploiting": ("Banned for Exploiting", None),
-            "NSFW": ("Banned for NSFW Content", None),
+            "Toxicity": ("Warned / 1d ban", None),
+            "Spawn Camping": ("Warned / 1d ban", None),
+            "Exploiting": ("pban w/o appeal", None),
+            "NSFW": ("30d", None),
         }
 
         # Load settings at startup
