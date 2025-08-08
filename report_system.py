@@ -808,6 +808,11 @@ Proof:
         auto_cb = tk.Checkbutton(frm, text="Auto-send to Webhook", variable=auto_var)
         auto_cb.pack(anchor=tk.W, pady=(0, 6))
 
+        # Dark mode toggle (moved up for visibility)
+        dark_var = tk.BooleanVar(value=self.cfg.get("dark_mode", False))
+        dark_cb = tk.Checkbutton(frm, text="Dark Mode", variable=dark_var)
+        dark_cb.pack(anchor=tk.W, pady=6)
+        
         # Moderator ID
         tk.Label(frm, text="Moderator ID:").pack(anchor=tk.W, pady=4)
         mod_var = tk.StringVar(value=self.cfg.get("moderator_id", ""))
@@ -861,11 +866,6 @@ Proof:
         tk.Button(res_frame, text="Down", command=lambda: self.move_result(1)).pack(
             side=tk.LEFT, padx=4
         )
-
-        # Dark mode toggle
-        dark_var = tk.BooleanVar(value=self.cfg.get("dark_mode", False))
-        dark_cb = tk.Checkbutton(frm, text="Dark Mode", variable=dark_var)
-        dark_cb.pack(anchor=tk.W, pady=6)
 
         def do_save_and_close():
             self.cfg["dark_mode"] = bool(dark_var.get())
