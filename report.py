@@ -1,506 +1,820 @@
+#!/usr/bin/env python3
+"""
+Report System - Dark mode fixes + Auto-webhook send
+
+- Full single-file Tkinter app
+- Dark-mode properly applied to all widgets (recursive)
+- Removed Send to Webhook button; auto-sends after Generate (if webhook configured)
+- Webhook payload includes timestamp that matches saved report timestamp
+- Keeps settings, punishment editor, separate report/ban DBs, search box, warnings, etc.
+"""
+
 import tkinter as tk
-from tkinter import messagebox, ttk
-import re
-import requests
+from tkinter import ttk, messagebox, simpledialog
+import sqlite3
 import json
+import re
 import os
 from datetime import datetime
 
+# optional requests for webhook posting
+try:
+    import requests
+except Exception:
+    requests = None
 
+# ---------- Files & defaults ----------
+SETTINGS_FILE = "settings.json"
+REPORT_DB = "report_logs.db"
+BAN_DB = "ban_logs.db"
+
+DEFAULT_SETTINGS = {
+    "rank": "Department Manager",
+    "moderator_id": "299146723979427840",
+    "webhook_url": "",
+    "punishments": [
+        {"name": "Toxicity", "action": "Warn / Tempban"},
+        {"name": "Spawn Camping", "action": "Warn / Tempban"},
+        {"name": "NSFW", "action": "Kick / Tempban"},
+        {"name": "Exploiting", "action": "Permaban"},
+        {"name": "Avatar Abuse", "action": "Warn"}
+    ],
+    "dark_mode": False
+}
+
+# ---------- Settings helpers ----------
+def load_settings():
+    if not os.path.isfile(SETTINGS_FILE):
+        save_settings(dict(DEFAULT_SETTINGS))
+        return dict(DEFAULT_SETTINGS)
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = dict(DEFAULT_SETTINGS)
+    # ensure keys
+    for k, v in DEFAULT_SETTINGS.items():
+        if k not in cfg:
+            cfg[k] = v
+    return cfg
+
+def save_settings(cfg):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+# ---------- Database helpers ----------
+def init_databases():
+    # reports DB
+    conn = sqlite3.connect(REPORT_DB)
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT,
+        rank TEXT,
+        reporter TEXT,
+        reporter_profile TEXT,
+        reported TEXT,
+        reported_profile TEXT,
+        reason TEXT,
+        result TEXT,
+        jobid TEXT,
+        raw TEXT
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+    # bans DB
+    conn = sqlite3.connect(BAN_DB)
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS bans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT,
+        rank TEXT,
+        user TEXT,
+        reason TEXT,
+        punishment TEXT,
+        proof TEXT,
+        report_id INTEGER
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+def add_report_to_db(rep):
+    conn = sqlite3.connect(REPORT_DB)
+    cur = conn.cursor()
+    cur.execute("""
+    INSERT INTO reports (timestamp, rank, reporter, reporter_profile, reported, reported_profile, reason, result, jobid, raw)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (rep.get("timestamp"), rep.get("rank"), rep.get("reporter"), rep.get("reporter_profile"),
+          rep.get("reported"), rep.get("reported_profile"), rep.get("reason"),
+          rep.get("result"), rep.get("jobid"), rep.get("raw")))
+    conn.commit()
+    rowid = cur.lastrowid
+    conn.close()
+    return rowid
+
+def add_ban_to_db(ban):
+    conn = sqlite3.connect(BAN_DB)
+    cur = conn.cursor()
+    cur.execute("""
+    INSERT INTO bans (timestamp, rank, user, reason, punishment, proof, report_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (ban.get("timestamp"), ban.get("rank"), ban.get("user"),
+          ban.get("reason"), ban.get("punishment"), ban.get("proof"), ban.get("report_id")))
+    conn.commit()
+    rowid = cur.lastrowid
+    conn.close()
+    return rowid
+
+def find_reports_for_player(player_name_or_id):
+    conn = sqlite3.connect(REPORT_DB)
+    cur = conn.cursor()
+    q = f"%{player_name_or_id}%"
+    cur.execute("""
+    SELECT id, timestamp, reporter, reported, reason, jobid FROM reports
+    WHERE reporter LIKE ? OR reported LIKE ? OR reporter_profile LIKE ? OR reported_profile LIKE ?
+    ORDER BY id DESC
+    """, (q,q,q,q))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def count_reports_for_player(player_name_or_id):
+    conn = sqlite3.connect(REPORT_DB)
+    cur = conn.cursor()
+    q = f"%{player_name_or_id}%"
+    cur.execute("""
+    SELECT COUNT(*) FROM reports
+    WHERE reported LIKE ? OR reported_profile LIKE ?
+    """, (q,q))
+    cnt = cur.fetchone()[0]
+    conn.close()
+    return cnt
+
+# ---------- Parsing helpers ----------
+PROFILE_URL_RE = re.compile(r"https?://www\.roblox\.com/users/(\d+)/profile", re.I)
+JOBID_RE = re.compile(r"JobID[:\s]*([0-9a-fA-F\-]{8,})", re.I)
+
+def extract_name_before(fulltext, pos):
+    snippet = fulltext[max(0, pos-120):pos].strip()
+    lines = [ln.strip() for ln in snippet.splitlines() if ln.strip()]
+    if lines:
+        return lines[-1]
+    return ""
+
+def parse_raw_report(text):
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    reporter = reporter_profile = reported = reported_profile = ""
+    reason_lines = []
+    jobid = ""
+    mj = JOBID_RE.search(text)
+    if mj:
+        jobid = mj.group(1)
+    profiles = list(PROFILE_URL_RE.finditer(text))
+    if profiles:
+        if len(profiles) >= 1:
+            reporter_profile = profiles[0].group(0)
+            reporter = extract_name_before(text, profiles[0].start())
+        if len(profiles) >= 2:
+            reported_profile = profiles[1].group(0)
+            reported = extract_name_before(text, profiles[1].start())
+    low = text.lower()
+    if "reporter" in low:
+        for i,l in enumerate(lines):
+            if l.lower().startswith("reporter"):
+                if i+1 < len(lines) and not PROFILE_URL_RE.search(lines[i+1]):
+                    reporter = lines[i+1]
+                for j in range(i+1, min(i+6,len(lines))):
+                    m = PROFILE_URL_RE.search(lines[j])
+                    if m:
+                        reporter_profile = m.group(0)
+                        break
+                break
+    if "player being reported" in low or "reported" in low:
+        for i,l in enumerate(lines):
+            if "player being reported" in l.lower() or l.lower().startswith("reported") or l.lower().startswith("player"):
+                if i+1 < len(lines) and not PROFILE_URL_RE.search(lines[i+1]):
+                    reported = lines[i+1]
+                for j in range(i+1, min(i+6,len(lines))):
+                    m = PROFILE_URL_RE.search(lines[j])
+                    if m:
+                        reported_profile = m.group(0)
+                        break
+                break
+    if not reporter and len(lines) >= 1:
+        for l in lines:
+            if any(x in l.lower() for x in ("new report","report type","reason","jobid","player","reporter")):
+                continue
+            reporter = l
+            break
+    skip_terms = ("reporter", "player being reported", "report type", "reason", "jobid", "new report", "player", "reported")
+    for l in lines:
+        if any(l.lower().startswith(s) for s in skip_terms):
+            continue
+        if PROFILE_URL_RE.search(l):
+            continue
+        reason_lines.append(l)
+    reason = "\n".join(reason_lines).strip()
+    return {
+        "reporter": reporter,
+        "reporter_profile": reporter_profile,
+        "reported": reported,
+        "reported_profile": reported_profile,
+        "reason": reason,
+        "jobid": jobid
+    }
+
+# ---------- UI class ----------
 class ReportApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Report System")
+    def __init__(self, master):
+        self.master = master
+        master.title("Report System")
+        master.geometry("760x820")
+        master.minsize(720,600)
 
-        # Set minimum window size to ensure all elements are visible
-        self.root.minsize(600, 900)  # Adjust height to fit all buttons and output boxes
+        # load settings & init DBs
+        self.cfg = load_settings()
+        init_databases()
 
-        # Initialize variables
-        self.moderator_id = "<@299146723979427840>"
-        self.report_result = ""
-        self.selected_rank = "Administrator"  # Default rank
-        self.webhook_url = ""  # Placeholder for Discord webhook URL
-        self.reported_users_file = "reported_users.txt"  # File to store reported usernames
-        self.result = ""  # Initialize result variable
-        self.punishment = ""  # Store the current punishment action
-        self.punishment_label = ""  # Store the current punishment label
-        self.dark_mode_enabled = tk.BooleanVar(value=False)  # Initialize dark mode state
+        # state
+        self.current_punishment = None
+        self.current_result = ""
+        self.widget_registry = {"frames":[], "labels":[], "buttons":[], "entries":[], "text":[], "listboxes":[], "combos":[], "others":[]}
 
-        # Default punishment buttons
-        self.punishment_buttons = {
-            "Toxicity": ("Warned / 1d ban", None),
-            "Spawn Camping": ("Warned / 1d ban", None),
-            "Exploiting": ("pban w/o appeal", None),
-            "NSFW": ("30d", None),
-        }
+        # build UI
+        self._build_ui()
+        # apply theme recursively to ensure no stray white areas
+        self.apply_theme_recursive()
+        # attach close/save
+        self.master.protocol("WM_DELETE_WINDOW", self.quit_and_save)
 
-        # Load settings at startup
-        self.load_settings()
+    def _register(self, widget, wtype):
+        try:
+            self.widget_registry[wtype].append(widget)
+        except Exception:
+            self.widget_registry["others"].append(widget)
 
-        # Display current rank
-        self.rank_label = tk.Label(root, text=f"Rank: {self.get_rank_display()}")
-        self.rank_label.place(x=10, y=10)  # Use absolute positioning for the rank label
+    def _build_ui(self):
+        # Top frame
+        top_frame = tk.Frame(self.master)
+        top_frame.pack(fill=tk.X, padx=10, pady=6)
+        self._register(top_frame, "frames")
 
-        # Input box
-        tk.Label(root, text="Paste Report Info Here:").place(x=10, y=250)
-        self.input_entry = tk.Text(root, height=10, width=50)
-        self.input_entry.place(x=10, y=280)
+        lbl_rank = tk.Label(top_frame, text="Rank:")
+        lbl_rank.pack(side=tk.LEFT)
+        self._register(lbl_rank, "labels")
 
-        # Punishment Buttons
-        tk.Label(root, text="Select Punishment:").place(x=10, y=50)  # Use absolute positioning for the label
-        self.create_punishment_buttons()
+        self.rank_var = tk.StringVar(value=self.cfg.get("rank"))
+        self.rank_combo = ttk.Combobox(top_frame, values=["Department Manager","Senior Manager","Moderator","Junior Mod"],
+                                       textvariable=self.rank_var, state="readonly", width=26)
+        self.rank_combo.pack(side=tk.LEFT, padx=6)
+        self._register(self.rank_combo, "combos")
 
-        # Report Result Buttons
-        tk.Label(root, text="Select Report Result:").place(x=10, y=150)  # Use absolute positioning for the label
-        tk.Button(root, text="NEF", command=lambda: self.set_result("Not Enough Evidence")).place(x=10, y=180)
-        tk.Button(root, text="Banned", command=lambda: self.set_result("Banned")).place(x=110, y=180)
-        tk.Button(root, text="Forwarded", command=lambda: self.set_result("Temp Banned and Forwarded")).place(x=210, y=180)
+        btn_settings = tk.Button(top_frame, text="Settings", command=self.open_settings)
+        btn_settings.pack(side=tk.RIGHT)
+        self._register(btn_settings, "buttons")
 
-        # Generate Report button
-        tk.Button(root, text="Generate Report", command=self.generate_report).place(x=155, y=450)  # Adjusted position
+        # Punishment frame
+        pun_frame = tk.LabelFrame(self.master, text="Select Punishment")
+        pun_frame.pack(fill=tk.X, padx=10, pady=6)
+        self._register(pun_frame, "frames")
+        self.pun_inner = tk.Frame(pun_frame)
+        self.pun_inner.pack(fill=tk.X, padx=6, pady=4)
+        self._register(self.pun_inner, "frames")
+        self._render_punishment_buttons()
 
-        # Output boxes
-        self.report_output = tk.Text(root, height=10, width=50)
-        self.report_output.place(x=10, y=500)
+        # Result buttons (as buttons)
+        result_outer = tk.Frame(self.master)
+        result_outer.pack(fill=tk.X, padx=10, pady=4)
+        self._register(result_outer, "frames")
+        lbl_result = tk.Label(result_outer, text="Select Report Result:")
+        lbl_result.pack(side=tk.LEFT)
+        self._register(lbl_result, "labels")
+        result_frame = tk.Frame(result_outer)
+        result_frame.pack(side=tk.LEFT, padx=8)
+        self._register(result_frame, "frames")
+        # create result buttons and keep references (for theme)
+        self.result_buttons = {}
+        for r in ["NEF", "Banned", "Forwarded"]:
+            b = tk.Button(result_frame, text=r, width=10, command=lambda rr=r: self.set_result(rr))
+            b.pack(side=tk.LEFT, padx=4)
+            self._register(b, "buttons")
+            self.result_buttons[r] = b
 
-        self.ban_output = tk.Text(root, height=10, width=50)
-        self.ban_output.place(x=10, y=650)
+        # Paste area
+        paste_label = tk.Label(self.master, text="Paste Report Info Here:")
+        paste_label.pack(anchor=tk.W, padx=10)
+        self._register(paste_label, "labels")
 
-        # Ban Log Button
-        tk.Button(root, text="Open Ban Log", command=self.open_ban_log).place(x=10, y=820)
+        self.paste_text = tk.Text(self.master, height=10, wrap=tk.WORD)
+        self.paste_text.pack(fill=tk.BOTH, padx=10, pady=4)
+        self._register(self.paste_text, "text")
 
-        # Settings Menu Button
-        tk.Button(root, text="Settings", command=self.open_settings).place(x=110, y=820)
+        # Buttons row (Generate only; Send removed — auto-send will happen)
+        btn_frame = tk.Frame(self.master)
+        btn_frame.pack(fill=tk.X, padx=10, pady=4)
+        self._register(btn_frame, "frames")
+        gen_btn = tk.Button(btn_frame, text="Generate Report", command=self.generate_report, width=16)
+        gen_btn.pack(side=tk.LEFT, padx=4)
+        self._register(gen_btn, "buttons")
 
-        # Print current rank button (next to settings button)
-        tk.Button(root, text="Print Current Rank", command=self.print_current_rank).place(x=210, y=820)
+        open_log_btn = tk.Button(btn_frame, text="Open Report Log", command=self.open_report_log)
+        open_log_btn.pack(side=tk.RIGHT, padx=4)
+        self._register(open_log_btn, "buttons")
+        open_ban_log_btn = tk.Button(btn_frame, text="Open Ban Log", command=self.open_ban_log)
+        open_ban_log_btn.pack(side=tk.RIGHT, padx=4)
+        self._register(open_ban_log_btn, "buttons")
 
-        # Save settings when the window is closed
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Spacer area (becomes themed)
+        spacer = tk.Frame(self.master, height=6)
+        spacer.pack(fill=tk.X, padx=10, pady=2)
+        self._register(spacer, "frames")
 
-    def get_rank_display(self):
-        rank_display_mapping = {
-            "Trial Moderator": "Trial Moderator",
-            "Moderator": "Moderator",
-            "Admin": "Administrator",
-            "Senior Administrator": "Senior Administrator"  # Add Senior Administrator here
-        }
-        return rank_display_mapping.get(self.selected_rank, "Rank: ")
+        # Output areas: Report and Ban
+        rep_label = tk.Label(self.master, text="Report Log Output:")
+        rep_label.pack(anchor=tk.W, padx=10, pady=(8,0))
+        self._register(rep_label, "labels")
+        self.report_output = tk.Text(self.master, height=8, wrap=tk.WORD)
+        self.report_output.pack(fill=tk.BOTH, padx=10, pady=4)
+        self._register(self.report_output, "text")
 
-    def update_rank_label(self):
-        self.rank_label.config(text=f"Rank: {self.get_rank_display()}")
+        ban_label = tk.Label(self.master, text="Punishment Log Output:")
+        ban_label.pack(anchor=tk.W, padx=10, pady=(8,0))
+        self._register(ban_label, "labels")
+        self.ban_output = tk.Text(self.master, height=6, wrap=tk.WORD)
+        self.ban_output.pack(fill=tk.BOTH, padx=10, pady=4)
+        self._register(self.ban_output, "text")
 
-    def create_punishment_buttons(self):
-        """Create punishment buttons dynamically."""
-        for i, (label, (action, button)) in enumerate(self.punishment_buttons.items()):
-            if button is None:  # Only create the button if it doesn't already exist
-                button = tk.Button(
-                    self.root,
-                    text=label,
-                    command=lambda a=action, l=label: self.set_punishment(a, l)
-                )
-                button.place(x=10 + i * 100, y=80)  # Default position
-                self.punishment_buttons[label] = (action, button)
+        # Search bar (small) + results
+        search_frame = tk.Frame(self.master)
+        search_frame.pack(fill=tk.X, padx=10, pady=6)
+        self._register(search_frame, "frames")
+        self.search_var = tk.StringVar()
+        self.search_entry = tk.Entry(search_frame, textvariable=self.search_var)
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._register(self.search_entry, "entries")
+        search_btn = tk.Button(search_frame, text="Search", command=self.search_reports_small, width=12)
+        search_btn.pack(side=tk.LEFT, padx=6)
+        self._register(search_btn, "buttons")
 
-    def set_punishment(self, punishment, label):
-        self.punishment = punishment  # Set the punishment based on the button clicked
-        self.punishment_label = label  # Store the label for the ban log
+        sr_label = tk.Label(self.master, text="Search Results:")
+        sr_label.pack(anchor=tk.W, padx=10)
+        self._register(sr_label, "labels")
+        self.search_results = tk.Text(self.master, height=6, wrap=tk.WORD)
+        self.search_results.pack(fill=tk.BOTH, padx=10, pady=4)
+        self._register(self.search_results, "text")
 
-    def set_result(self, result):
-        """Set the result based on the button clicked."""
-        self.result = result
+    def _render_punishment_buttons(self):
+        # clear
+        for w in self.pun_inner.winfo_children():
+            w.destroy()
+        self.pun_buttons = []
+        for p in self.cfg.get("punishments", []):
+            name = p.get("name")
+            b = tk.Button(self.pun_inner, text=name, command=lambda nm=name: self.on_punishment_click(nm))
+            b.pack(side=tk.LEFT, padx=4, pady=2)
+            self.pun_buttons.append(b)
+            self._register(b, "buttons")
 
-    def generate_report(self):
-        # Get input data
-        input_data = self.input_entry.get("1.0", tk.END).strip()
-
-        # Regular expression patterns to capture the needed information
-        reporter_pattern = r"Reporter\s*([\w_]+)"
-        reported_pattern = r"Player Being Reported\s*([\w_]+)"
-        reason_pattern = r"Reason\s*([\s\S]+?)\s*JobID:"
-        jobid_pattern = r"JobID:\s*([\w-]+)"
-
-        # Extracting information using regex
-        reporter = re.search(reporter_pattern, input_data)
-        reported = re.search(reported_pattern, input_data)
-        reason = re.search(reason_pattern, input_data)
-        job_id = re.search(jobid_pattern, input_data)
-
-        if all([reporter, reported, reason, job_id]):
-            reported_username = reported.group(1).strip()
-
-            # Check if the user has been reported before
-            if self.check_if_reported(reported_username):
-                messagebox.showwarning("Previous Report Warning", f"The user '{reported_username}' has been reported before.")
-
-            # Create formatted report log with dynamic rank based on selected rank
-            rank_display = self.get_rank_display()  # Always fetch the updated rank
-            report_log = f"""
-{rank_display}: {self.moderator_id}
-Reporter: {reporter.group(1)}
-Reported: {reported_username}
-Reason: {reason.group(1).strip()}
-Result: {self.result}
-JobID: {job_id.group(1)}
-"""
-
-            # Create formatted ban log using the specified format
-            ban_log = f"""
-{rank_display}: {self.moderator_id}
-User: {reported_username}
-Reason: {self.punishment_label}
-Punishment: {self.punishment}
+    def on_punishment_click(self, name):
+        self.current_punishment = name
+        # attempt to prefill ban output with the selected punishment and current reported if present
+        reported_name = ""
+        curr_rep = self.report_output.get("1.0", tk.END)
+        m = re.search(r"^Reported:\s*(.+)$", curr_rep, re.MULTILINE)
+        if m:
+            reported_name = m.group(1).strip()
+        rank_line = f"{self.rank_var.get()}: <@{self.cfg.get('moderator_id')}>"
+        ban_template = f"""{rank_line}
+User: {reported_name}
+Reason: 
+Punishment: {name}
 Proof: 
 """
+        self.ban_output.delete("1.0", tk.END)
+        self.ban_output.insert(tk.END, ban_template)
 
-            # Clear previous output and insert new report log
-            self.report_output.delete(1.0, tk.END)
-            self.report_output.insert(tk.END, report_log)
+    def set_result(self, result):
+        # update selection visually (simple highlight) and store selection
+        self.current_result = result
+        # simple visual: change bg of selected button(s), reset others
+        for r, btn in self.result_buttons.items():
+            try:
+                if r == result:
+                    btn.configure(relief=tk.SUNKEN)
+                else:
+                    btn.configure(relief=tk.RAISED)
+            except Exception:
+                pass
 
-            # Log the ban
-            self.ban_output.delete(1.0, tk.END)  # Clear previous ban output
-            self.ban_output.insert(tk.END, ban_log)  # Insert new ban log
-            self.send_to_webhook(report_log)  # Send report log to Discord webhook
+    def generate_report(self):
+        raw = self.paste_text.get("1.0", tk.END).strip()
+        if not raw:
+            messagebox.showinfo("No Input", "Please paste the report text into the input area first.")
+            return
+        # parse
+        parsed = parse_raw_report(raw)
+        rank_line = f"{self.rank_var.get()}: <@{self.cfg.get('moderator_id')}>"
+        reporter = parsed.get("reporter") or ""
+        reported = parsed.get("reported") or ""
+        reason = parsed.get("reason") or ""
+        jobid = parsed.get("jobid") or ""
+        result = self.current_result or ""
 
-            # Add the reported username to the list if it is not already present
-            self.add_reported_user(reported_username)
+        # check previous reports count
+        cnt = count_reports_for_player(reported or parsed.get("reported_profile") or "")
+        if cnt > 0:
+            prev = find_reports_for_player(reported)
+            last_entries = prev[:3]
+            msg = f"{reported} has been reported {cnt} time(s) before.\n\nLast entries:\n"
+            for r in last_entries:
+                msg += f"- {r[1]} | Reporter: {r[2]} | Reason: {r[4]}\n"
+            messagebox.showwarning("Previously Reported", msg)
 
-            # Ask if the user wants to clear the input box
-            if messagebox.askyesno("Clear Input", "Do you want to clear the input box?"):
-                self.input_entry.delete(1.0, tk.END)  # Clear input box if user selects Yes
+        # build formatted report output
+        report_formatted = f"""{rank_line}
+Reporter: {reporter}
+Reported: {reported}
+Reason:
+{reason}
+Result: {result}
+JobID: {jobid}
+"""
+        self.report_output.delete("1.0", tk.END)
+        self.report_output.insert(tk.END, report_formatted)
+
+        # build ban/punishment output (auto-fill punishment if selected)
+        punishment = self.current_punishment or ""
+        ban_formatted = f"""{rank_line}
+User: {reported}
+Reason: {punishment if punishment else ''}
+Punishment: {punishment if punishment else ''}
+Proof: 
+"""
+        self.ban_output.delete("1.0", tk.END)
+        self.ban_output.insert(tk.END, ban_formatted)
+
+        # save to DBs with timestamp (UTC ISO)
+        timestamp = datetime.utcnow().isoformat() + "Z"
+        rep = {
+            "timestamp": timestamp,
+            "rank": self.rank_var.get(),
+            "reporter": reporter,
+            "reporter_profile": parsed.get("reporter_profile"),
+            "reported": reported,
+            "reported_profile": parsed.get("reported_profile"),
+            "reason": reason,
+            "result": result,
+            "jobid": jobid,
+            "raw": raw
+        }
+        report_id = add_report_to_db(rep)
+
+        ban = {
+            "timestamp": timestamp,
+            "rank": self.rank_var.get(),
+            "user": reported,
+            "reason": reason,
+            "punishment": punishment or "",
+            "proof": "",
+            "report_id": report_id
+        }
+        add_ban_to_db(ban)
+
+        # auto-clear input
+        self.paste_text.delete("1.0", tk.END)
+
+        # Auto-send to webhook if configured
+        webhook_url = self.cfg.get("webhook_url","").strip()
+        if webhook_url:
+            # We'll call send_webhook but do not block UI entirely: attempt send and report result
+            self._auto_send_webhook(webhook_url, report_formatted, ban_formatted, timestamp)
         else:
-            messagebox.showerror("Input Error", "Please ensure all fields are correctly filled.")
+            messagebox.showinfo("Saved", "Report saved locally. (No webhook configured — set one in Settings)")
 
-    def check_if_reported(self, username):
-        if not os.path.exists(self.reported_users_file):
-            return False  # File does not exist, user has not been reported
+    def _auto_send_webhook(self, url, report_text, ban_text, timestamp_iso):
+        if not requests:
+            messagebox.showwarning("Webhook not sent", "requests library not installed. Install with:\n\npip install requests\n\nReport saved locally but not sent.")
+            return
+        payload = {
+            "username": self.rank_var.get(),
+            "embeds": [
+                {
+                    "title": "Report Log",
+                    "description": f"```{report_text}```",
+                    "timestamp": timestamp_iso
+                },
+                {
+                    "title": "Punishment Log",
+                    "description": f"```{ban_text}```",
+                    "timestamp": timestamp_iso
+                }
+            ]
+        }
+        try:
+            r = requests.post(url, json=payload, timeout=10)
+            if r.status_code in (200,204):
+                messagebox.showinfo("Sent", "Report & Punishment sent to webhook and saved locally.")
+            else:
+                messagebox.showwarning("Webhook error", f"HTTP {r.status_code}: {r.text}\nReport saved locally.")
+        except Exception as e:
+            messagebox.showwarning("Send failed", f"Webhook send failed: {e}\nReport saved locally.")
 
-        with open(self.reported_users_file, "r") as file:
-            reported_users = file.read().splitlines()
-            return username in reported_users  # Check if username is in reported users list
-
-    def add_reported_user(self, username):
-        with open(self.reported_users_file, "a") as file:
-            file.write(username + "\n")  # Append new reported username to the file
+    def open_report_log(self):
+        w = tk.Toplevel(self.master)
+        w.title("Report Log")
+        w.geometry("900x600")
+        txt = tk.Text(w)
+        txt.pack(fill=tk.BOTH, expand=True)
+        conn = sqlite3.connect(REPORT_DB)
+        cur = conn.cursor()
+        cur.execute("SELECT id, timestamp, rank, reporter, reported, reason, result, jobid FROM reports ORDER BY id DESC LIMIT 1000")
+        rows = cur.fetchall()
+        conn.close()
+        display = []
+        for r in rows:
+            display.append(f"ID:{r[0]} | {r[1]} | {r[2]} | Reporter: {r[3]} | Reported: {r[4]} | Result: {r[6]} | JobID: {r[7]}\nReason: {r[5]}\n\n")
+        txt.insert(tk.END, "".join(display))
 
     def open_ban_log(self):
-        # Logic to open the ban log
-        try:
-            os.startfile("ban_log.txt")  # This will depend on your OS
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not open the ban log: {e}")
+        w = tk.Toplevel(self.master)
+        w.title("Ban Log Backup")
+        w.geometry("900x600")
+        txt = tk.Text(w)
+        txt.pack(fill=tk.BOTH, expand=True)
+        conn = sqlite3.connect(BAN_DB)
+        cur = conn.cursor()
+        cur.execute("SELECT id, timestamp, rank, user, reason, punishment, proof, report_id FROM bans ORDER BY id DESC LIMIT 1000")
+        rows = cur.fetchall()
+        conn.close()
+        display = []
+        for r in rows:
+            display.append(f"ID:{r[0]} | {r[1]} | {r[2]} | User: {r[3]} | Punishment: {r[5]} | ReportID: {r[7]}\nReason: {r[4]}\nProof: {r[6]}\n\n")
+        txt.insert(tk.END, "".join(display))
 
+    def search_reports_small(self):
+        key = self.search_var.get().strip()
+        if not key:
+            messagebox.showinfo("Input", "Enter a player name or id to search.")
+            return
+        rows = find_reports_for_player(key)
+        if not rows:
+            self.search_results.delete("1.0", tk.END)
+            self.search_results.insert(tk.END, "No previous reports found.")
+            return
+        out_lines = []
+        for r in rows[:200]:
+            out_lines.append(f"{r[1]} | Reporter: {r[2]} | Reported: {r[3]} | JobID: {r[5]}\nReason: {r[4]}\n\n")
+        self.search_results.delete("1.0", tk.END)
+        self.search_results.insert(tk.END, "".join(out_lines))
+
+    # ---------- Settings window ----------
     def open_settings(self):
-        Settings(self)  # Create an instance of the Settings class
+        w = tk.Toplevel(self.master)
+        w.title("Settings")
+        w.geometry("520x640")
+        frm = tk.Frame(w, padx=8, pady=8)
+        frm.pack(fill=tk.BOTH, expand=True)
 
-    def on_closing(self):
-        self.save_settings()  # Save settings before closing
-        self.root.destroy()  # Close the application
+        lbl = tk.Label(frm, text="Select Rank:")
+        lbl.pack(anchor=tk.W)
+        rank_var = tk.StringVar(value=self.cfg.get("rank"))
+        rank_cb = ttk.Combobox(frm, values=["Department Manager","Senior Manager","Moderator","Junior Mod"],
+                               textvariable=rank_var, state="readonly")
+        rank_cb.pack(fill=tk.X, pady=4)
+        tk.Button(frm, text="Update Rank", command=lambda: self._update_rank(rank_var.get())).pack(pady=4)
 
-    def load_settings(self):
-        """Load settings from a JSON file if it exists."""
-        if os.path.exists("settings.json"):
-            with open("settings.json", "r") as file:
-                settings = json.load(file)
-                self.moderator_id = settings.get("moderator_id", self.moderator_id)
-                self.selected_rank = settings.get("rank", self.selected_rank)
-                self.webhook_url = settings.get("webhook_url", self.webhook_url)
-                dark_mode = settings.get("dark_mode", False)  # Load dark mode state
-                self.apply_dark_mode(dark_mode)  # Apply dark mode
-                self.dark_mode_enabled.set(dark_mode)  # Initialize variable
+        tk.Label(frm, text="Webhook URL:").pack(anchor=tk.W, pady=4)
+        wh_var = tk.StringVar(value=self.cfg.get("webhook_url",""))
+        wh_entry = tk.Entry(frm, textvariable=wh_var)
+        wh_entry.pack(fill=tk.X)
+        tk.Button(frm, text="Update Webhook", command=lambda: self._update_webhook(wh_var.get())).pack(pady=4)
 
-                # Update punishment buttons without duplicating
-                for label, data in settings.get("punishment_buttons", {}).items():
-                    action = data.get("action", "")
-                    position = data.get("position", None)
+        tk.Label(frm, text="Moderator ID:").pack(anchor=tk.W, pady=4)
+        mod_var = tk.StringVar(value=self.cfg.get("moderator_id",""))
+        tk.Entry(frm, textvariable=mod_var).pack(fill=tk.X)
+        tk.Button(frm, text="Update Moderator ID", command=lambda: self._update_modid(mod_var.get())).pack(pady=4)
 
-                    # Check if the button already exists in the dictionary
-                    if label in self.punishment_buttons:
-                        _, button = self.punishment_buttons[label]
-                        if button is None:
-                            # Create a new button if the reference is None
-                            button = tk.Button(
-                                self.root,
-                                text=label,
-                                command=lambda a=action, l=label: self.set_punishment(a, l)
-                            )
-                            self.punishment_buttons[label] = (action, button)
-                        if position:
-                            button.place(x=position[0], y=position[1])  # Update position
-                    else:
-                        # Create a new button if it doesn't exist
-                        new_button = tk.Button(
-                            self.root,
-                            text=label,
-                            command=lambda a=action, l=label: self.set_punishment(a, l)
-                        )
-                        if position:
-                            new_button.place(x=position[0], y=position[1])
-                        self.punishment_buttons[label] = (action, new_button)
+        # Punishment management
+        tk.Label(frm, text="Manage Punishments:").pack(anchor=tk.W, pady=(8,0))
+        self.pun_listbox = tk.Listbox(frm, height=6)
+        self.pun_listbox.pack(fill=tk.X, pady=4)
+        self._refresh_pun_listbox()
+        pb_frame = tk.Frame(frm)
+        pb_frame.pack(fill=tk.X, pady=4)
+        tk.Button(pb_frame, text="Add", command=self.add_punishment).pack(side=tk.LEFT, padx=4)
+        tk.Button(pb_frame, text="Edit", command=self.edit_punishment).pack(side=tk.LEFT, padx=4)
+        tk.Button(pb_frame, text="Delete", command=self.delete_punishment).pack(side=tk.LEFT, padx=4)
+        tk.Button(pb_frame, text="Up", command=lambda: self.move_punishment(-1)).pack(side=tk.LEFT, padx=4)
+        tk.Button(pb_frame, text="Down", command=lambda: self.move_punishment(1)).pack(side=tk.LEFT, padx=4)
 
-    def save_settings(self):
-        """Save current settings to a JSON file."""
-        settings = {
-            "moderator_id": self.moderator_id,
-            "rank": self.selected_rank,
-            "webhook_url": self.webhook_url,
-            "dark_mode": self.dark_mode_enabled.get(),
-            "punishment_buttons": {
-                k: {
-                    "action": v[0],
-                    "position": (v[1].winfo_x(), v[1].winfo_y()) if isinstance(v[1], tk.Button) else None
-                }
-                for k, v in self.punishment_buttons.items() if v[1] is not None  # Only save existing buttons
-            }
-        }
-        with open("settings.json", "w") as file:
-            json.dump(settings, file)
+        # Dark mode toggle
+        dark_var = tk.BooleanVar(value=self.cfg.get("dark_mode", False))
+        dark_cb = tk.Checkbutton(frm, text="Dark Mode", variable=dark_var)
+        dark_cb.pack(anchor=tk.W, pady=6)
 
-    def send_to_webhook(self, report_log):
-        # Your existing code to send the report log to Discord webhook
-        if self.webhook_url:
-            try:
-                response = requests.post(self.webhook_url, json={"content": report_log})
-                response.raise_for_status()  # Raise an error for bad responses
-            except requests.exceptions.RequestException as e:
-                messagebox.showerror("Webhook Error", f"Could not send report to webhook: {e}")
+        def do_save_and_close():
+            self.cfg["dark_mode"] = bool(dark_var.get())
+            save_settings(self.cfg)
+            self.apply_theme_recursive()  # re-apply UI theme
+            w.destroy()
+        tk.Button(frm, text="Save and Close", command=do_save_and_close).pack(pady=12)
 
-    def print_current_rank(self):
-        # Display the current rank in a message box
-        messagebox.showinfo("Current Rank", f"The current rank is: {self.get_rank_display()}")
+    def _update_rank(self, val):
+        self.cfg['rank'] = val
+        self.rank_var.set(val)
+        save_settings(self.cfg)
+        messagebox.showinfo("Saved", "Rank updated.")
 
-    def apply_dark_mode(self, enable):
-        """Apply dark mode to the application."""
-        bg_color = "#2E2E2E" if enable else "#F0F0F0"
-        fg_color = "#FFFFFF" if enable else "#000000"
+    def _update_webhook(self, val):
+        self.cfg['webhook_url'] = val.strip()
+        save_settings(self.cfg)
+        messagebox.showinfo("Saved", "Webhook updated.")
 
-        # Update the root window
-        self.root.configure(bg=bg_color)
+    def _update_modid(self, val):
+        self.cfg['moderator_id'] = val.strip()
+        save_settings(self.cfg)
+        messagebox.showinfo("Saved", "Moderator ID updated.")
 
-        # Update all widgets
-        for widget in self.root.winfo_children():
-            if isinstance(widget, (tk.Label, tk.Button, tk.Text)):
-                widget.configure(bg=bg_color, fg=fg_color)
-            if isinstance(widget, tk.Text):
-                widget.configure(insertbackground=fg_color)  # Cursor color for Text widgets
-
-
-class Settings:
-    def __init__(self, report_app):
-        self.report_app = report_app
-        self.window = tk.Toplevel()
-        self.window.title("Settings")
-
-        # Rank
-        tk.Label(self.window, text="Select Rank:").pack()
-        self.rank_var = tk.StringVar(value=self.report_app.selected_rank)
-        rank_options = ["Trial Moderator", "Moderator", "Admin", "Senior Administrator"]
-        self.rank_menu = ttk.Combobox(self.window, textvariable=self.rank_var, values=rank_options)
-        self.rank_menu.pack()
-        tk.Button(self.window, text="Update Rank", command=self.update_rank).pack()
-
-        # Webhook URL
-        tk.Label(self.window, text="Webhook URL:").pack()
-        self.webhook_var = tk.StringVar(value=self.report_app.webhook_url)
-        self.webhook_entry = tk.Entry(self.window, textvariable=self.webhook_var, width=50)
-        self.webhook_entry.pack()
-        tk.Button(self.window, text="Update Webhook", command=self.update_webhook).pack()
-
-        # Moderator ID
-        tk.Label(self.window, text="Moderator ID:").pack()
-        self.moderator_var = tk.StringVar(value=self.report_app.moderator_id[2:-1])  # Strip <@>
-        self.moderator_entry = tk.Entry(self.window, textvariable=self.moderator_var, width=50)
-        self.moderator_entry.pack()
-        tk.Button(self.window, text="Update Moderator ID", command=self.update_moderator).pack()
-
-        # Punishment Management
-        tk.Label(self.window, text="Manage Punishments:").pack()
-        self.manage_punishment_var = tk.StringVar()
-        self.manage_punishment_menu = ttk.Combobox(
-            self.window,
-            textvariable=self.manage_punishment_var,
-            values=list(self.report_app.punishment_buttons.keys())
-        )
-        self.manage_punishment_menu.pack()
-
-        # Entry for new action or name
-        tk.Label(self.window, text="New Value:").pack()
-        self.new_value_var = tk.StringVar()
-        self.new_value_entry = tk.Entry(self.window, textvariable=self.new_value_var)
-        self.new_value_entry.pack()
-
-        # Buttons for updating or deleting punishments
-        tk.Button(self.window, text="Update Punishment", command=self.update_punishment).pack()
-        tk.Button(self.window, text="Delete Punishment", command=self.delete_punishment).pack()
-
-        # Add New Punishment
-        tk.Label(self.window, text="Punishment Name:").pack()
-        self.new_punishment_name_var = tk.StringVar()
-        self.new_punishment_name_entry = tk.Entry(self.window, textvariable=self.new_punishment_name_var)
-        self.new_punishment_name_entry.pack()
-        tk.Label(self.window, text="Punishment Action:").pack()
-        self.new_punishment_action_var = tk.StringVar()
-        self.new_punishment_action_entry = tk.Entry(self.window, textvariable=self.new_punishment_action_var)
-        self.new_punishment_action_entry.pack()
-        tk.Button(self.window, text="Add Punishment", command=self.add_punishment).pack()
-
-        # Drag-and-Drop Toggle
-        tk.Label(self.window, text="Drag and Drop Punishment Buttons:").pack()
-        self.drag_enabled = tk.BooleanVar(value=False)
-        tk.Checkbutton(self.window, text="Enable", variable=self.drag_enabled, command=self.toggle_drag).pack()
-
-        # Save and Restore Button Positions
-        tk.Button(self.window, text="Save Button Positions", command=self.save_button_positions).pack()
-        tk.Button(self.window, text="Restore Button Positions", command=self.restore_button_positions).pack()
-
-        # Dark Mode Toggle
-        tk.Label(self.window, text="Dark Mode:").pack()
-        self.dark_mode_enabled = tk.BooleanVar(value=self.report_app.dark_mode_enabled.get())
-        tk.Checkbutton(self.window, text="Enable", variable=self.dark_mode_enabled, command=self.toggle_dark_mode).pack()
-
-    def update_rank(self):
-        new_rank = self.rank_var.get()
-        self.report_app.selected_rank = new_rank
-        self.report_app.update_rank_label()  # Update the rank label in the main app
-        self.report_app.save_settings()  # Save the new rank
-        messagebox.showinfo("Rank Updated", f"Rank updated to {new_rank}")
-
-    def update_webhook(self):
-        new_webhook = self.webhook_var.get()
-        self.report_app.webhook_url = new_webhook
-        self.report_app.save_settings()  # Save the new webhook
-        messagebox.showinfo("Webhook Updated", "Webhook URL updated successfully")
-
-    def update_moderator(self):
-        new_moderator_id = "<@" + self.moderator_var.get() + ">"  # Format moderator ID correctly
-        self.report_app.moderator_id = new_moderator_id
-        self.report_app.save_settings()  # Save the new moderator ID
-        messagebox.showinfo("Moderator ID Updated", f"Moderator ID updated to {new_moderator_id}")
+    def _refresh_pun_listbox(self):
+        self.pun_listbox.delete(0, tk.END)
+        for p in self.cfg.get("punishments", []):
+            self.pun_listbox.insert(tk.END, f"{p.get('name')} -> {p.get('action')}")
 
     def add_punishment(self):
-        punishment_name = self.new_punishment_name_var.get()
-        punishment_action = self.new_punishment_action_var.get()
-        if punishment_name and punishment_action:
-            # Add the punishment to the dictionary
-            self.report_app.punishment_buttons[punishment_name] = (punishment_action, None)
+        name = simpledialog.askstring("Punishment name", "Name (button text):", parent=self.master)
+        if not name:
+            return
+        action = simpledialog.askstring("Punishment action", "Action (description):", parent=self.master)
+        if action is None:
+            action = ""
+        self.cfg.setdefault("punishments", []).append({"name": name, "action": action})
+        save_settings(self.cfg)
+        self._refresh_pun_listbox()
+        self._render_punishment_buttons()
 
-            # Create a new button for the punishment
-            new_button = tk.Button(
-                self.report_app.root,
-                text=punishment_name,
-                command=lambda a=punishment_action, l=punishment_name: self.report_app.set_punishment(a, l)
-            )
-            # Place the button dynamically (e.g., below existing buttons)
-            button_count = len(self.report_app.punishment_buttons)
-            new_button.place(x=10 + (button_count - 1) * 100, y=80)  # Adjust x and y as needed
-
-            # Update the punishment_buttons dictionary with the button reference
-            self.report_app.punishment_buttons[punishment_name] = (punishment_action, new_button)
-
-            # Save the updated punishments
-            self.report_app.save_settings()
-            messagebox.showinfo("Punishment Added", f"Punishment '{punishment_name}' added successfully!")
-        else:
-            messagebox.showerror("Input Error", "Please fill out both fields for the punishment.")
-
-    def update_punishment(self):
-        selected_punishment = self.manage_punishment_var.get()
-        new_value = self.new_value_var.get()
-        if selected_punishment and new_value:
-            if selected_punishment in self.report_app.punishment_buttons:
-                # Update the punishment action
-                action, button = self.report_app.punishment_buttons[selected_punishment]
-                self.report_app.punishment_buttons[selected_punishment] = (new_value, button)
-                self.report_app.save_settings()
-                messagebox.showinfo("Punishment Updated", f"Punishment '{selected_punishment}' updated successfully!")
-            else:
-                messagebox.showerror("Error", "Selected punishment does not exist.")
-        else:
-            messagebox.showerror("Input Error", "Please select a punishment and provide a new value.")
+    def edit_punishment(self):
+        sel = self.pun_listbox.curselection()
+        if not sel:
+            messagebox.showinfo("Select", "Select an item to edit.")
+            return
+        idx = sel[0]
+        p = self.cfg["punishments"][idx]
+        name = simpledialog.askstring("Punishment name", "Name (button text):", initialvalue=p.get("name"), parent=self.master)
+        if name is None:
+            return
+        action = simpledialog.askstring("Punishment action", "Action (description):", initialvalue=p.get("action"), parent=self.master)
+        if action is None:
+            action = ""
+        self.cfg["punishments"][idx] = {"name": name, "action": action}
+        save_settings(self.cfg)
+        self._refresh_pun_listbox()
+        self._render_punishment_buttons()
 
     def delete_punishment(self):
-        punishment_name = self.manage_punishment_var.get()
-        if punishment_name in self.report_app.punishment_buttons:
-            # Remove the button from the GUI
-            _, button = self.report_app.punishment_buttons[punishment_name]
-            if button:
-                button.destroy()
-            # Remove the punishment from the dictionary
-            del self.report_app.punishment_buttons[punishment_name]
-            # Save the updated punishments to settings
-            self.report_app.save_settings()
-            messagebox.showinfo("Punishment Deleted", f"Punishment '{punishment_name}' deleted successfully!")
+        sel = self.pun_listbox.curselection()
+        if not sel:
+            messagebox.showinfo("Select", "Select an item to delete.")
+            return
+        idx = sel[0]
+        if messagebox.askyesno("Confirm", "Delete selected punishment?"):
+            del self.cfg["punishments"][idx]
+            save_settings(self.cfg)
+            self._refresh_pun_listbox()
+            self._render_punishment_buttons()
+
+    def move_punishment(self, delta):
+        sel = self.pun_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        new = idx + delta
+        if new < 0 or new >= len(self.cfg["punishments"]):
+            return
+        items = self.cfg["punishments"]
+        items[idx], items[new] = items[new], items[idx]
+        self.cfg["punishments"] = items
+        save_settings(self.cfg)
+        self._refresh_pun_listbox()
+        self._render_punishment_buttons()
+
+    # ---------- Theme application (recursive) ----------
+    def apply_theme_recursive(self):
+        dark = self.cfg.get("dark_mode", False)
+        if dark:
+            bg = "#2b2b2b"
+            fg = "#FFFFFF"
+            entry_bg = "#222222"
+            text_bg = "#1e1e1e"
+            btn_bg = "#333333"
+            listbox_bg = "#1f1f1f"
         else:
-            messagebox.showerror("Error", "Punishment not found.")
+            # use system defaults (light)
+            bg = self.master.cget("bg")
+            fg = "#000000"
+            entry_bg = "#ffffff"
+            text_bg = "#ffffff"
+            btn_bg = None
+            listbox_bg = "#ffffff"
 
-    def toggle_drag(self):
-        """Enable or disable drag-and-drop functionality."""
-        if self.drag_enabled.get():
-            for label, (_, button) in self.report_app.punishment_buttons.items():
-                if button and not hasattr(button, "drag_enabled"):  # Check if drag is already enabled
-                    button.bind("<Button-1>", self.start_drag)
-                    button.bind("<B1-Motion>", self.drag)
-                    button.bind("<ButtonRelease-1>", self.stop_drag)
-                    button.drag_enabled = True  # Mark the button as having drag enabled
-        else:
-            for label, (_, button) in self.report_app.punishment_buttons.items():
-                if button and hasattr(button, "drag_enabled"):  # Check if drag was enabled
-                    button.unbind("<Button-1>")
-                    button.unbind("<B1-Motion>")
-                    button.unbind("<ButtonRelease-1>")
-                    del button.drag_enabled  # Remove the drag-enabled flag
+        # apply to main window
+        try:
+            self.master.configure(bg=bg)
+        except Exception:
+            pass
 
-    def start_drag(self, event):
-        """Start dragging a button."""
-        self.dragging_button = event.widget
-        self.start_x = event.x
+        # helper to walk widget tree
+        def walk(w):
+            children = w.winfo_children()
+            for c in children:
+                # Frames / LabelFrames
+                cls = c.winfo_class()
+                try:
+                    if isinstance(c, tk.Frame) or isinstance(c, tk.LabelFrame):
+                        c.configure(bg=bg)
+                    # Labels
+                    if isinstance(c, tk.Label):
+                        c.configure(bg=bg, fg=fg)
+                    # Buttons (tk.Button)
+                    if isinstance(c, tk.Button):
+                        # button backgrounds not consistent across platforms; set what we can
+                        try:
+                            if btn_bg:
+                                c.configure(bg=btn_bg, fg=fg, activebackground=btn_bg, activeforeground=fg)
+                            else:
+                                # reset
+                                c.configure(bg=None, fg=None)
+                        except Exception:
+                            pass
+                    # Entries
+                    if isinstance(c, tk.Entry):
+                        try:
+                            c.configure(bg=entry_bg, fg=fg, insertbackground=fg)
+                        except Exception:
+                            pass
+                    # Text widgets
+                    if isinstance(c, tk.Text):
+                        try:
+                            c.configure(bg=text_bg, fg=fg, insertbackground=fg)
+                        except Exception:
+                            pass
+                    # Listbox
+                    if isinstance(c, tk.Listbox):
+                        try:
+                            c.configure(bg=listbox_bg, fg=fg, selectbackground=btn_bg or "#cfcfcf", selectforeground=fg)
+                        except Exception:
+                            pass
+                    # Combobox (ttk)
+                    if isinstance(c, ttk.Combobox):
+                        # ttk styling via style
+                        style = ttk.Style()
+                        try:
+                            # create a custom style name per mode
+                            style_name = "Dark.TCombobox" if dark else "TCombobox"
+                            style.configure(style_name, fieldbackground=entry_bg, background=entry_bg, foreground=fg)
+                            c.configure(style=style_name)
+                        except Exception:
+                            pass
+                    # Checkbutton (tk)
+                    if isinstance(c, tk.Checkbutton):
+                        try:
+                            c.configure(bg=bg, fg=fg, selectcolor=bg, activeforeground=fg)
+                        except Exception:
+                            pass
+                    # Recursive walk
+                    walk(c)
+                except Exception:
+                    # If anything goes wrong, still attempt recursion
+                    try:
+                        walk(c)
+                    except Exception:
+                        pass
+        walk(self.master)
 
-    def drag(self, event):
-        """Handle dragging of a button."""
-        if self.dragging_button:
-            dx = event.x - self.start_x
-            current_x = self.dragging_button.winfo_x()
-            new_x = current_x + dx
-            # Constrain the button's movement within the window's width
-            if new_x < 0:
-                new_x = 0
-            elif new_x + self.dragging_button.winfo_width() > self.dragging_button.winfo_toplevel().winfo_width():
-                new_x = self.dragging_button.winfo_toplevel().winfo_width() - self.dragging_button.winfo_width()
-            self.dragging_button.place(x=new_x)
+    # ---------- Save on exit ----------
+    def quit_and_save(self):
+        save_settings(self.cfg)
+        self.master.quit()
 
-    def stop_drag(self, event):
-        """Stop dragging and save the new position."""
-        if self.dragging_button:
-            # Find the label of the dragged button
-            for label, (action, button) in self.report_app.punishment_buttons.items():
-                if button == self.dragging_button:
-                    # Update the position in the punishment_buttons dictionary
-                    new_x = self.dragging_button.winfo_x()
-                    new_y = self.dragging_button.winfo_y()
-                    self.report_app.punishment_buttons[label] = (action, self.dragging_button)
+    # ---------- Shutdown wrapper ----------
+    def quit_and_exit(self):
+        self.quit_and_save()
+        self.master.destroy()
 
-                    # Save the new position to settings
-                    self.report_app.save_settings()
-                    break
-        self.dragging_button = None
-
-    def save_button_positions(self):
-        """Manually save the positions of the buttons."""
-        self.report_app.save_settings()
-        messagebox.showinfo("Save Positions", "Button positions have been saved successfully.")
-
-    def restore_button_positions(self):
-        """Restore the positions of the buttons from the settings."""
-        self.report_app.load_settings()
-        messagebox.showinfo("Restore Positions", "Button positions have been restored successfully.")
-
-    def toggle_dark_mode(self):
-        """Toggle dark mode on or off."""
-        self.report_app.apply_dark_mode(self.dark_mode_enabled.get())
-        self.report_app.save_settings()  # Save the dark mode state
-
+# ---------- Main ----------
+def main():
+    init_databases()
+    root = tk.Tk()
+    cfg = load_settings()
+    app = ReportApp(root)
+    # ensure cfg after constructing UI
+    app.cfg = cfg
+    app.apply_theme_recursive()
+    root.mainloop()
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ReportApp(root)
-    root.mainloop()
+    main()
