@@ -295,13 +295,49 @@ def parse_raw_report(text):
         "player",
         "reported",
     )
-    for l in lines:
-        if any(l.lower().startswith(s) for s in skip_terms):
-            continue
-        if PROFILE_URL_RE.search(l):
-            continue
-        reason_lines.append(l)
-    reason = "\n".join(reason_lines).strip()
+
+    # Prefer capturing explicit Reason section lines until next known header
+    reason = ""
+    for i, l in enumerate(lines):
+        if l.lower().startswith("reason"):
+            for j in range(i + 1, len(lines)):
+                stop_terms = (
+                    "jobid",
+                    "result",
+                    "reporter",
+                    "player being reported",
+                    "reported",
+                    "new report",
+                    "report type",
+                    "player",
+                )
+                lj = lines[j].lower()
+                if any(lj.startswith(s) for s in stop_terms):
+                    break
+                if PROFILE_URL_RE.search(lines[j]):
+                    continue
+                reason_lines.append(lines[j])
+            reason = "\n".join(reason_lines).strip()
+            break
+
+    # Fallback heuristic: exclude the name lines that immediately follow headers
+    if not reason:
+        reason_lines = []
+        skip_next_name = False
+        for l in lines:
+            low = l.lower()
+            if any(low.startswith(s) for s in skip_terms):
+                skip_next_name = True
+                continue
+            if skip_next_name:
+                # Skip the single line following a header (likely a username)
+                skip_next_name = False
+                continue
+            if PROFILE_URL_RE.search(l):
+                continue
+            reason_lines.append(l)
+        reason = "\n".join(reason_lines).strip()
+
     return {
         "reporter": reporter,
         "reporter_profile": reporter_profile,
