@@ -12,7 +12,7 @@ except Exception:
 SETTINGS_FILE = 'settings.json'
 REPORT_DB = 'report_logs.db'
 BAN_DB = 'ban_logs.db'
-DEFAULT_SETTINGS = {'rank': 'Department Manager', 'moderator_id': '299146723979427840', 'webhook_url': '', 'punishments': [{'name': 'Toxicity', 'action': 'Warn / Tempban'}, {'name': 'Spawn Camping', 'action': 'Warn / Tempban'}, {'name': 'NSFW', 'action': 'Kick / Tempban'}, {'name': 'Exploiting', 'action': 'Permaban'}, {'name': 'Avatar Abuse', 'action': 'Warn'}], 'dark_mode': False}
+DEFAULT_SETTINGS = {'rank': 'Department Manager', 'moderator_id': '299146723979427840', 'webhook_url': '', 'auto_send_webhook': True, 'ranks': ['Department Manager', 'Senior Manager', 'Moderator', 'Junior Mod'], 'results': ['NEF', 'Banned', 'Forwarded'], 'punishments': [{'name': 'Toxicity', 'action': 'Warn / Tempban'}, {'name': 'Spawn Camping', 'action': 'Warn / Tempban'}, {'name': 'NSFW', 'action': 'Kick / Tempban'}, {'name': 'Exploiting', 'action': 'Permaban'}, {'name': 'Avatar Abuse', 'action': 'Warn'}], 'dark_mode': False}
 
 def load_settings():
     if not os.path.isfile(SETTINGS_FILE):
@@ -26,6 +26,14 @@ def load_settings():
     for k, v in DEFAULT_SETTINGS.items():
         if k not in cfg:
             cfg[k] = v
+    if not isinstance(cfg.get('ranks'), list) or not cfg['ranks']:
+        cfg['ranks'] = list(DEFAULT_SETTINGS['ranks'])
+    if not isinstance(cfg.get('results'), list) or not cfg['results']:
+        cfg['results'] = list(DEFAULT_SETTINGS['results'])
+    if not isinstance(cfg.get('punishments'), list):
+        cfg['punishments'] = list(DEFAULT_SETTINGS['punishments'])
+    if 'auto_send_webhook' not in cfg:
+        cfg['auto_send_webhook'] = True
     return cfg
 
 def save_settings(cfg):
@@ -170,22 +178,50 @@ class ReportApp:
     def __init__(self, master):
         self.master = master
         master.title('Report System')
-        master.geometry('760x820')
+        master.geometry('760x880')
         master.minsize(720, 600)
         self.cfg = load_settings()
         init_databases()
         self.current_punishment = None
         self.current_result = ''
         self.widget_registry = {'frames': [], 'labels': [], 'buttons': [], 'entries': [], 'text': [], 'listboxes': [], 'combos': [], 'others': []}
+        self._orig_styles = {}
         self._build_ui()
+        self.capture_default_styles()
         self.apply_theme_recursive()
         self.master.protocol('WM_DELETE_WINDOW', self.quit_and_save)
+
+    def _record_widget_defaults(self, widget):
+        if widget in self._orig_styles:
+            return
+        defaults = {}
+        for opt in ('bg', 'fg', 'insertbackground', 'selectbackground', 'selectforeground', 'activebackground', 'activeforeground', 'highlightbackground', 'highlightcolor', 'relief'):
+            try:
+                defaults[opt] = widget.cget(opt)
+            except Exception:
+                pass
+        try:
+            style_val = widget.cget('style')
+            if style_val is not None:
+                defaults['style'] = style_val
+        except Exception:
+            pass
+        self._orig_styles[widget] = defaults
+
+    def capture_default_styles(self):
+
+        def walk(w):
+            self._record_widget_defaults(w)
+            for c in w.winfo_children():
+                walk(c)
+        walk(self.master)
 
     def _register(self, widget, wtype):
         try:
             self.widget_registry[wtype].append(widget)
         except Exception:
             self.widget_registry['others'].append(widget)
+        self._record_widget_defaults(widget)
 
     def _build_ui(self):
         top_frame = tk.Frame(self.master)
@@ -195,7 +231,7 @@ class ReportApp:
         lbl_rank.pack(side=tk.LEFT)
         self._register(lbl_rank, 'labels')
         self.rank_var = tk.StringVar(value=self.cfg.get('rank'))
-        self.rank_combo = ttk.Combobox(top_frame, values=['Department Manager', 'Senior Manager', 'Moderator', 'Junior Mod'], textvariable=self.rank_var, state='readonly', width=26)
+        self.rank_combo = ttk.Combobox(top_frame, values=self.cfg.get('ranks', DEFAULT_SETTINGS['ranks']), textvariable=self.rank_var, state='readonly', width=26)
         self.rank_combo.pack(side=tk.LEFT, padx=6)
         self._register(self.rank_combo, 'combos')
         btn_settings = tk.Button(top_frame, text='Settings', command=self.open_settings)
@@ -214,15 +250,11 @@ class ReportApp:
         lbl_result = tk.Label(result_outer, text='Select Report Result:')
         lbl_result.pack(side=tk.LEFT)
         self._register(lbl_result, 'labels')
-        result_frame = tk.Frame(result_outer)
-        result_frame.pack(side=tk.LEFT, padx=8)
-        self._register(result_frame, 'frames')
+        self.result_frame = tk.Frame(result_outer)
+        self.result_frame.pack(side=tk.LEFT, padx=8)
+        self._register(self.result_frame, 'frames')
         self.result_buttons = {}
-        for r in ['NEF', 'Banned', 'Forwarded']:
-            b = tk.Button(result_frame, text=r, width=10, command=lambda rr=r: self.set_result(rr))
-            b.pack(side=tk.LEFT, padx=4)
-            self._register(b, 'buttons')
-            self.result_buttons[r] = b
+        self._render_result_buttons()
         paste_label = tk.Label(self.master, text='Paste Report Info Here:')
         paste_label.pack(anchor=tk.W, padx=10)
         self._register(paste_label, 'labels')
@@ -283,6 +315,24 @@ class ReportApp:
             b.pack(side=tk.LEFT, padx=4, pady=2)
             self.pun_buttons.append(b)
             self._register(b, 'buttons')
+        self.capture_default_styles()
+        self.apply_theme_recursive()
+
+    def _render_result_buttons(self):
+        for w in self.result_frame.winfo_children():
+            w.destroy()
+        self.result_buttons = {}
+        for r in self.cfg.get('results', DEFAULT_SETTINGS['results']):
+            b = tk.Button(self.result_frame, text=r, width=10, command=lambda rr=r: self.set_result(rr))
+            b.pack(side=tk.LEFT, padx=4)
+            self._register(b, 'buttons')
+            self.result_buttons[r] = b
+        if self.current_result not in self.result_buttons:
+            self.current_result = ''
+        else:
+            self.set_result(self.current_result)
+        self.capture_default_styles()
+        self.apply_theme_recursive()
 
     def on_punishment_click(self, name):
         self.current_punishment = name
@@ -341,10 +391,13 @@ class ReportApp:
         add_ban_to_db(ban)
         self.paste_text.delete('1.0', tk.END)
         webhook_url = self.cfg.get('webhook_url', '').strip()
-        if webhook_url:
+        should_auto_send = bool(self.cfg.get('auto_send_webhook', True))
+        if webhook_url and should_auto_send:
             self._auto_send_webhook(webhook_url, report_formatted, ban_formatted, timestamp)
-        else:
+        elif not webhook_url:
             messagebox.showinfo('Saved', 'Report saved locally. (No webhook configured — set one in Settings)')
+        else:
+            messagebox.showinfo('Saved', 'Report saved locally. (Auto-send is disabled in Settings)')
 
     def _auto_send_webhook(self, url, report_text, ban_text, timestamp_iso):
         if not requests:
@@ -411,20 +464,37 @@ class ReportApp:
     def open_settings(self):
         w = tk.Toplevel(self.master)
         w.title('Settings')
-        w.geometry('520x640')
+        w.geometry('620x820')
         frm = tk.Frame(w, padx=8, pady=8)
         frm.pack(fill=tk.BOTH, expand=True)
         lbl = tk.Label(frm, text='Select Rank:')
         lbl.pack(anchor=tk.W)
         rank_var = tk.StringVar(value=self.cfg.get('rank'))
-        rank_cb = ttk.Combobox(frm, values=['Department Manager', 'Senior Manager', 'Moderator', 'Junior Mod'], textvariable=rank_var, state='readonly')
+        rank_cb = ttk.Combobox(frm, values=self.cfg.get('ranks', DEFAULT_SETTINGS['ranks']), textvariable=rank_var, state='readonly')
         rank_cb.pack(fill=tk.X, pady=4)
         tk.Button(frm, text='Update Rank', command=lambda: self._update_rank(rank_var.get())).pack(pady=4)
+        tk.Label(frm, text='Manage Ranks:').pack(anchor=tk.W, pady=(8, 0))
+        self.ranks_listbox = tk.Listbox(frm, height=6)
+        self.ranks_listbox.pack(fill=tk.X, pady=4)
+        self._refresh_ranks_listbox()
+        rb_frame = tk.Frame(frm)
+        rb_frame.pack(fill=tk.X, pady=4)
+        tk.Button(rb_frame, text='Add', command=self.add_rank).pack(side=tk.LEFT, padx=4)
+        tk.Button(rb_frame, text='Edit', command=self.edit_rank).pack(side=tk.LEFT, padx=4)
+        tk.Button(rb_frame, text='Delete', command=self.delete_rank).pack(side=tk.LEFT, padx=4)
+        tk.Button(rb_frame, text='Up', command=lambda: self.move_rank(-1)).pack(side=tk.LEFT, padx=4)
+        tk.Button(rb_frame, text='Down', command=lambda: self.move_rank(1)).pack(side=tk.LEFT, padx=4)
         tk.Label(frm, text='Webhook URL:').pack(anchor=tk.W, pady=4)
         wh_var = tk.StringVar(value=self.cfg.get('webhook_url', ''))
         wh_entry = tk.Entry(frm, textvariable=wh_var)
         wh_entry.pack(fill=tk.X)
         tk.Button(frm, text='Update Webhook', command=lambda: self._update_webhook(wh_var.get())).pack(pady=4)
+        auto_var = tk.BooleanVar(value=bool(self.cfg.get('auto_send_webhook', True)))
+        auto_cb = tk.Checkbutton(frm, text='Auto-send to Webhook', variable=auto_var)
+        auto_cb.pack(anchor=tk.W, pady=(0, 6))
+        dark_var = tk.BooleanVar(value=self.cfg.get('dark_mode', False))
+        dark_cb = tk.Checkbutton(frm, text='Dark Mode', variable=dark_var)
+        dark_cb.pack(anchor=tk.W, pady=6)
         tk.Label(frm, text='Moderator ID:').pack(anchor=tk.W, pady=4)
         mod_var = tk.StringVar(value=self.cfg.get('moderator_id', ''))
         tk.Entry(frm, textvariable=mod_var).pack(fill=tk.X)
@@ -440,12 +510,21 @@ class ReportApp:
         tk.Button(pb_frame, text='Delete', command=self.delete_punishment).pack(side=tk.LEFT, padx=4)
         tk.Button(pb_frame, text='Up', command=lambda: self.move_punishment(-1)).pack(side=tk.LEFT, padx=4)
         tk.Button(pb_frame, text='Down', command=lambda: self.move_punishment(1)).pack(side=tk.LEFT, padx=4)
-        dark_var = tk.BooleanVar(value=self.cfg.get('dark_mode', False))
-        dark_cb = tk.Checkbutton(frm, text='Dark Mode', variable=dark_var)
-        dark_cb.pack(anchor=tk.W, pady=6)
+        tk.Label(frm, text='Manage Results Buttons:').pack(anchor=tk.W, pady=(8, 0))
+        self.results_listbox = tk.Listbox(frm, height=6)
+        self.results_listbox.pack(fill=tk.X, pady=4)
+        self._refresh_results_listbox()
+        res_frame = tk.Frame(frm)
+        res_frame.pack(fill=tk.X, pady=4)
+        tk.Button(res_frame, text='Add', command=self.add_result).pack(side=tk.LEFT, padx=4)
+        tk.Button(res_frame, text='Edit', command=self.edit_result).pack(side=tk.LEFT, padx=4)
+        tk.Button(res_frame, text='Delete', command=self.delete_result).pack(side=tk.LEFT, padx=4)
+        tk.Button(res_frame, text='Up', command=lambda: self.move_result(-1)).pack(side=tk.LEFT, padx=4)
+        tk.Button(res_frame, text='Down', command=lambda: self.move_result(1)).pack(side=tk.LEFT, padx=4)
 
         def do_save_and_close():
             self.cfg['dark_mode'] = bool(dark_var.get())
+            self.cfg['auto_send_webhook'] = bool(auto_var.get())
             save_settings(self.cfg)
             self.apply_theme_recursive()
             w.destroy()
@@ -466,6 +545,62 @@ class ReportApp:
         self.cfg['moderator_id'] = val.strip()
         save_settings(self.cfg)
         messagebox.showinfo('Saved', 'Moderator ID updated.')
+
+    def _refresh_ranks_listbox(self):
+        self.ranks_listbox.delete(0, tk.END)
+        for r in self.cfg.get('ranks', []):
+            self.ranks_listbox.insert(tk.END, r)
+
+    def add_rank(self):
+        name = simpledialog.askstring('Add Rank', 'Rank name:', parent=self.master)
+        if not name:
+            return
+        self.cfg.setdefault('ranks', []).append(name)
+        save_settings(self.cfg)
+        self._refresh_ranks_listbox()
+        self.rank_combo.configure(values=self.cfg['ranks'])
+
+    def edit_rank(self):
+        sel = self.ranks_listbox.curselection()
+        if not sel:
+            messagebox.showinfo('Select', 'Select a rank to edit.')
+            return
+        idx = sel[0]
+        cur = self.cfg['ranks'][idx]
+        name = simpledialog.askstring('Edit Rank', 'Rank name:', initialvalue=cur, parent=self.master)
+        if not name:
+            return
+        self.cfg['ranks'][idx] = name
+        save_settings(self.cfg)
+        self._refresh_ranks_listbox()
+        self.rank_combo.configure(values=self.cfg['ranks'])
+
+    def delete_rank(self):
+        sel = self.ranks_listbox.curselection()
+        if not sel:
+            messagebox.showinfo('Select', 'Select a rank to delete.')
+            return
+        idx = sel[0]
+        if messagebox.askyesno('Confirm', 'Delete selected rank?'):
+            del self.cfg['ranks'][idx]
+            save_settings(self.cfg)
+            self._refresh_ranks_listbox()
+            self.rank_combo.configure(values=self.cfg.get('ranks', []))
+
+    def move_rank(self, delta):
+        sel = self.ranks_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        new = idx + delta
+        if new < 0 or new >= len(self.cfg['ranks']):
+            return
+        items = self.cfg['ranks']
+        items[idx], items[new] = (items[new], items[idx])
+        self.cfg['ranks'] = items
+        save_settings(self.cfg)
+        self._refresh_ranks_listbox()
+        self.rank_combo.configure(values=self.cfg['ranks'])
 
     def _refresh_pun_listbox(self):
         self.pun_listbox.delete(0, tk.END)
@@ -529,6 +664,62 @@ class ReportApp:
         self._refresh_pun_listbox()
         self._render_punishment_buttons()
 
+    def _refresh_results_listbox(self):
+        self.results_listbox.delete(0, tk.END)
+        for r in self.cfg.get('results', []):
+            self.results_listbox.insert(tk.END, r)
+
+    def add_result(self):
+        name = simpledialog.askstring('Add Result', 'Result label:', parent=self.master)
+        if not name:
+            return
+        self.cfg.setdefault('results', []).append(name)
+        save_settings(self.cfg)
+        self._refresh_results_listbox()
+        self._render_result_buttons()
+
+    def edit_result(self):
+        sel = self.results_listbox.curselection()
+        if not sel:
+            messagebox.showinfo('Select', 'Select a result to edit.')
+            return
+        idx = sel[0]
+        cur = self.cfg['results'][idx]
+        name = simpledialog.askstring('Edit Result', 'Result label:', initialvalue=cur, parent=self.master)
+        if not name:
+            return
+        self.cfg['results'][idx] = name
+        save_settings(self.cfg)
+        self._refresh_results_listbox()
+        self._render_result_buttons()
+
+    def delete_result(self):
+        sel = self.results_listbox.curselection()
+        if not sel:
+            messagebox.showinfo('Select', 'Select a result to delete.')
+            return
+        idx = sel[0]
+        if messagebox.askyesno('Confirm', 'Delete selected result?'):
+            del self.cfg['results'][idx]
+            save_settings(self.cfg)
+            self._refresh_results_listbox()
+            self._render_result_buttons()
+
+    def move_result(self, delta):
+        sel = self.results_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        new = idx + delta
+        if new < 0 or new >= len(self.cfg['results']):
+            return
+        items = self.cfg['results']
+        items[idx], items[new] = (items[new], items[idx])
+        self.cfg['results'] = items
+        save_settings(self.cfg)
+        self._refresh_results_listbox()
+        self._render_result_buttons()
+
     def apply_theme_recursive(self):
         dark = self.cfg.get('dark_mode', False)
         if dark:
@@ -539,62 +730,84 @@ class ReportApp:
             btn_bg = '#333333'
             listbox_bg = '#1f1f1f'
         else:
-            bg = self.master.cget('bg')
-            fg = '#000000'
-            entry_bg = '#ffffff'
-            text_bg = '#ffffff'
+            bg = None
+            fg = None
+            entry_bg = None
+            text_bg = None
             btn_bg = None
-            listbox_bg = '#ffffff'
+            listbox_bg = None
         try:
-            self.master.configure(bg=bg)
+            if dark:
+                self.master.configure(bg=bg)
+            else:
+                orig = self._orig_styles.get(self.master, {}).get('bg')
+                if orig is not None:
+                    self.master.configure(bg=orig)
         except Exception:
             pass
+
+        def restore_defaults(c):
+            defaults = self._orig_styles.get(c, {})
+            to_apply = {}
+            for key, val in defaults.items():
+                if key == 'style':
+                    continue
+                to_apply[key] = val
+            if to_apply:
+                try:
+                    c.configure(**to_apply)
+                except Exception:
+                    pass
+            if 'style' in defaults:
+                try:
+                    c.configure(style=defaults['style'])
+                except Exception:
+                    pass
 
         def walk(w):
             children = w.winfo_children()
             for c in children:
-                cls = c.winfo_class()
                 try:
-                    if isinstance(c, tk.Frame) or isinstance(c, tk.LabelFrame):
-                        c.configure(bg=bg)
-                    if isinstance(c, tk.Label):
-                        c.configure(bg=bg, fg=fg)
-                    if isinstance(c, tk.Button):
-                        try:
-                            if btn_bg:
+                    if dark:
+                        if isinstance(c, (tk.Frame, tk.LabelFrame)):
+                            c.configure(bg=bg)
+                        if isinstance(c, tk.Label):
+                            c.configure(bg=bg, fg=fg)
+                        if isinstance(c, tk.Button):
+                            try:
                                 c.configure(bg=btn_bg, fg=fg, activebackground=btn_bg, activeforeground=fg)
-                            else:
-                                c.configure(bg=None, fg=None)
-                        except Exception:
-                            pass
-                    if isinstance(c, tk.Entry):
-                        try:
-                            c.configure(bg=entry_bg, fg=fg, insertbackground=fg)
-                        except Exception:
-                            pass
-                    if isinstance(c, tk.Text):
-                        try:
-                            c.configure(bg=text_bg, fg=fg, insertbackground=fg)
-                        except Exception:
-                            pass
-                    if isinstance(c, tk.Listbox):
-                        try:
-                            c.configure(bg=listbox_bg, fg=fg, selectbackground=btn_bg or '#cfcfcf', selectforeground=fg)
-                        except Exception:
-                            pass
-                    if isinstance(c, ttk.Combobox):
-                        style = ttk.Style()
-                        try:
-                            style_name = 'Dark.TCombobox' if dark else 'TCombobox'
-                            style.configure(style_name, fieldbackground=entry_bg, background=entry_bg, foreground=fg)
-                            c.configure(style=style_name)
-                        except Exception:
-                            pass
-                    if isinstance(c, tk.Checkbutton):
-                        try:
-                            c.configure(bg=bg, fg=fg, selectcolor=bg, activeforeground=fg)
-                        except Exception:
-                            pass
+                            except Exception:
+                                pass
+                        if isinstance(c, tk.Entry):
+                            try:
+                                c.configure(bg=entry_bg, fg=fg, insertbackground=fg)
+                            except Exception:
+                                pass
+                        if isinstance(c, tk.Text):
+                            try:
+                                c.configure(bg=text_bg, fg=fg, insertbackground=fg)
+                            except Exception:
+                                pass
+                        if isinstance(c, tk.Listbox):
+                            try:
+                                c.configure(bg=listbox_bg, fg=fg, selectbackground=btn_bg or '#444444', selectforeground=fg)
+                            except Exception:
+                                pass
+                        if isinstance(c, ttk.Combobox):
+                            style = ttk.Style()
+                            try:
+                                style_name = 'Dark.TCombobox'
+                                style.configure(style_name, fieldbackground=entry_bg, background=entry_bg, foreground=fg)
+                                c.configure(style=style_name)
+                            except Exception:
+                                pass
+                        if isinstance(c, tk.Checkbutton):
+                            try:
+                                c.configure(bg=bg, fg=fg, selectcolor=bg, activeforeground=fg)
+                            except Exception:
+                                pass
+                    else:
+                        restore_defaults(c)
                     walk(c)
                 except Exception:
                     try:
@@ -614,10 +827,7 @@ class ReportApp:
 def main():
     init_databases()
     root = tk.Tk()
-    cfg = load_settings()
     app = ReportApp(root)
-    app.cfg = cfg
-    app.apply_theme_recursive()
     root.mainloop()
 if __name__ == '__main__':
     main()
